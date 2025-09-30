@@ -1,0 +1,108 @@
+# docker-compose.yml
+x-superset-volumes:
+  &superset-volumes # Mounts your local config file into the container
+  - ./docker/superset_config.py:/app/pythonpath/superset_config.py
+
+services:
+  db:
+    container_name: my_postgres_for_airflow
+    image: postgres:14.7
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: weather_db
+      POSTGRES_USER: airflow_user
+      POSTGRES_PASSWORD: airflow_password
+    volumes:
+      - ./airflow_init.sql:/docker-entrypoint-initdb.d/airflow_init.sql
+      - ./postgres/data:/var/lib/postgresql/data
+    networks:
+      - my-network
+
+  redis:
+    image: redis:7
+    container_name: superset_cache
+    restart: unless-stopped
+    volumes:
+      - redis:/data
+    networks:
+      - my-network
+
+  af:
+    container_name: air_flow_cont
+    image: apache/airflow:3.0.0
+    command: standalone
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow_user:airflow_password@db:5432/airflow_db
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/src:/opt/airflow/src
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./dbt:/opt/airflow/dbt
+    group_add:
+      - "1001"
+    depends_on:
+      - db
+    networks:
+      - my-network
+
+  dbt:
+    container_name: dbt_container
+    image: ghcr.io/dbt-labs/dbt-postgres:1.9.latest
+    volumes:
+      - ./dbt/my_dbt:/usr/app
+      - ./dbt:/root/.dbt
+    working_dir: /usr/app
+    environment:
+      DBT_PROFILES_DIR: "/root/.dbt"
+    depends_on:
+      - db
+    networks:
+      - my-network
+    command: run
+
+  superset-init:
+    image: apache/superset:3.0.0-py310
+    container_name: superset_init
+
+    command: ["bash", "-c", "superset db upgrade && superset init"]
+    env_file:
+      - path: docker/.env-superset
+        required: true
+    depends_on:
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
+    volumes: *superset-volumes
+    networks:
+      - my-network
+
+  superset:
+    image: apache/superset:3.0.0-py310
+    container_name: superset_app
+    command:
+      ["bash", "-c", "superset run -h 0.0.0.0 -p 8088 --with-threads --reload"]
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    env_file:
+      - path: docker/.env-superset
+        required: true
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    volumes: *superset-volumes
+    networks:
+      - my-network
+
+networks:
+  my-network:
+    name: my-network
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis:
